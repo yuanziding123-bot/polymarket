@@ -44,6 +44,18 @@ CREATE TABLE IF NOT EXISTS positions (
     size_usdc REAL, opened_at TEXT, expiry TEXT,
     closed_at TEXT, close_reason TEXT, exit_price REAL, pnl_usdc REAL
 );
+CREATE TABLE IF NOT EXISTS trades_cache (
+    condition_id TEXT NOT NULL,
+    asset TEXT NOT NULL,
+    timestamp INTEGER NOT NULL,
+    side TEXT,
+    size REAL NOT NULL,
+    price REAL,
+    tx_hash TEXT,
+    proxy_wallet TEXT,
+    PRIMARY KEY (condition_id, asset, timestamp, tx_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_trades_cond_ts ON trades_cache(condition_id, timestamp);
 """
 
 
@@ -125,6 +137,70 @@ class TraceStore:
             )
 
     # ----- reads --------------------------------------------------------
+
+    # ----- trades cache --------------------------------------------------
+
+    def insert_trades(self, condition_id: str, trades: list[dict]) -> int:
+        """Bulk-insert trade rows. Duplicates ignored via PRIMARY KEY conflict."""
+        if not trades:
+            return 0
+        rows = [
+            (
+                condition_id,
+                str(t.get("asset") or ""),
+                int(t.get("timestamp") or 0),
+                str(t.get("side") or ""),
+                float(t.get("size") or 0.0),
+                float(t.get("price") or 0.0),
+                str(t.get("transactionHash") or ""),
+                str(t.get("proxyWallet") or ""),
+            )
+            for t in trades
+            if t.get("timestamp")
+        ]
+        with self._conn() as cx:
+            cx.executemany(
+                """INSERT OR IGNORE INTO trades_cache
+                   (condition_id, asset, timestamp, side, size, price, tx_hash, proxy_wallet)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                rows,
+            )
+        return len(rows)
+
+    def cached_trade_ts_range(self, condition_id: str) -> tuple[int, int] | None:
+        """Return (min_ts, max_ts) currently cached for this market, or None."""
+        with self._conn() as cx:
+            row = cx.execute(
+                "SELECT MIN(timestamp) AS lo, MAX(timestamp) AS hi FROM trades_cache WHERE condition_id=?",
+                (condition_id,),
+            ).fetchone()
+        if not row or row["lo"] is None:
+            return None
+        return int(row["lo"]), int(row["hi"])
+
+    def fetch_trades(
+        self,
+        condition_id: str,
+        asset: str | None = None,
+        min_ts: int | None = None,
+        max_ts: int | None = None,
+    ) -> list[sqlite3.Row]:
+        sql = "SELECT timestamp, asset, side, size, price FROM trades_cache WHERE condition_id=?"
+        args: list = [condition_id]
+        if asset:
+            sql += " AND asset=?"
+            args.append(asset)
+        if min_ts is not None:
+            sql += " AND timestamp>=?"
+            args.append(int(min_ts))
+        if max_ts is not None:
+            sql += " AND timestamp<=?"
+            args.append(int(max_ts))
+        sql += " ORDER BY timestamp ASC"
+        with self._conn() as cx:
+            return list(cx.execute(sql, args))
+
+    # ----- positions / decisions reads ----------------------------------
 
     def open_positions(self) -> list[sqlite3.Row]:
         with self._conn() as cx:

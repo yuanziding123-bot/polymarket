@@ -23,6 +23,13 @@ log = get_logger("polymarket")
 
 GAMMA_BASE = "https://gamma-api.polymarket.com"
 CLOB_BASE = SETTINGS.polymarket_host
+DATA_API_BASE = "https://data-api.polymarket.com"
+
+# /trades default order is desc-by-timestamp. Docs claim offset max=10000 but the
+# production API returns 400 once offset >= 3500, so we cap at 3000 to stay safe.
+# At limit=500 that's 7 pages = ~3500 most-recent trades reachable per market.
+TRADES_PAGE_SIZE = 500
+TRADES_MAX_OFFSET = 3000
 
 
 @dataclass
@@ -143,6 +150,52 @@ class PolymarketClient:
             price = float(point["p"])
             candles.append(Candle(ts=ts, open=price, high=price, low=price, close=price, volume=0.0))
         return candles
+
+    # ----- trades (data-api) -----
+
+    def fetch_market_trades(
+        self,
+        condition_id: str,
+        min_ts: int | None = None,
+        max_pages: int = 25,
+    ) -> list[dict]:
+        """Paginate /trades for a market until min_ts (unix seconds) or offset cap.
+
+        Trades come back desc-by-timestamp; we stop once a page contains a
+        trade older than min_ts (the rest are older too).
+        """
+        if not condition_id:
+            return []
+        out: list[dict] = []
+        offset = 0
+        for _ in range(max_pages):
+            if offset > TRADES_MAX_OFFSET:
+                break
+            try:
+                r = self._handles.http.get(
+                    f"{DATA_API_BASE}/trades",
+                    params={
+                        "market": condition_id,
+                        "limit": TRADES_PAGE_SIZE,
+                        "offset": offset,
+                        "takerOnly": "false",
+                    },
+                )
+                r.raise_for_status()
+                page = r.json() or []
+            except Exception as exc:
+                log.warning(f"/trades failed for {condition_id[:10]}…: {exc}")
+                break
+            if not page:
+                break
+            out.extend(page)
+            oldest = page[-1].get("timestamp")
+            if min_ts is not None and isinstance(oldest, (int, float)) and oldest < min_ts:
+                break
+            if len(page) < TRADES_PAGE_SIZE:
+                break
+            offset += TRADES_PAGE_SIZE
+        return out
 
     # ----- order book / trading -----
 
