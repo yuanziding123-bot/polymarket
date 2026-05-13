@@ -7,6 +7,7 @@ from typing import Iterable
 
 from config import SETTINGS
 from src.data.polymarket_client import PolymarketClient
+from src.notify.telegram import Notifier
 from src.storage.db import TraceStore
 from src.utils.logger import get_logger
 
@@ -37,10 +38,12 @@ class RiskManager:
         client: PolymarketClient,
         store: TraceStore,
         rules: RiskRules | None = None,
+        notifier: Notifier | None = None,
     ) -> None:
         self._client = client
         self._store = store
         self._rules = rules or RiskRules()
+        self._notifier = notifier or Notifier()
 
     def evaluate(self) -> list[CloseAction]:
         actions: list[CloseAction] = []
@@ -98,6 +101,11 @@ class RiskManager:
         self._store.close_position(action.token_id, action.reason,
                                    action.current_price, pnl_usdc)
         log.info(f"Closed {action.token_id[:10]} reason={action.reason} pnl={action.pnl_pct:+.2%}")
+        question = _question_for_market(self._store, action.market_id)
+        self._notifier.position_closed(
+            question=question, reason=action.reason,
+            exit_price=action.current_price, pnl_pct=action.pnl_pct, pnl_usdc=pnl_usdc,
+        )
 
     # ------------------------------------------------------------------
 
@@ -155,6 +163,15 @@ def _row_size(store: TraceStore, token_id: str) -> float:
     with store._conn() as cx:  # noqa: SLF001
         row = cx.execute("SELECT size_usdc FROM positions WHERE token_id=?", (token_id,)).fetchone()
         return float(row["size_usdc"]) if row else 0.0
+
+
+def _question_for_market(store: TraceStore, market_id: str) -> str:
+    with store._conn() as cx:  # noqa: SLF001
+        row = cx.execute(
+            "SELECT question FROM signals WHERE market_id=? ORDER BY id DESC LIMIT 1",
+            (market_id,),
+        ).fetchone()
+    return str(row["question"]) if row else market_id
 
 
 def all_open_token_ids(store: TraceStore) -> Iterable[str]:

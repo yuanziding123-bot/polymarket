@@ -12,8 +12,11 @@ log = get_logger("scanner")
 
 @dataclass(frozen=True)
 class FilterConfig:
-    min_price: float = 0.05
-    max_price: float = 0.50
+    # Tightened to the alpha-validated band per 回测分析报告 §6.1:
+    #   <0.10 is a "go-to-zero" trap with negative alpha
+    #   ≥0.30 has unreliable signals; ≥0.50 is consistently negative
+    min_price: float = 0.10
+    max_price: float = 0.30
     min_volume_24h: float = 5_000.0
     min_liquidity: float = 10_000.0
     max_spread_pct: float = 0.05

@@ -49,8 +49,8 @@ class DebateOrchestrator:
         if edge < EDGE_FLOOR or prob.confidence == "low":
             return self._skip(market, prob, edge, reason=f"edge<{EDGE_FLOOR} or low confidence")
 
-        bull = self._llm.complete_json(BULL_PROMPT.format(**ctx), max_tokens=500, temperature=0.4) or {}
-        bear = self._llm.complete_json(BEAR_PROMPT.format(**ctx), max_tokens=500, temperature=0.4) or {}
+        bull = self._llm.complete_json(BULL_PROMPT.format(**ctx), max_tokens=900, temperature=0.4) or {}
+        bear = self._llm.complete_json(BEAR_PROMPT.format(**ctx), max_tokens=900, temperature=0.4) or {}
 
         judge_prompt = JUDGE_PROMPT.format(
             question=market.question,

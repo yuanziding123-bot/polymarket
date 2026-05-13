@@ -7,6 +7,7 @@ from uuid import uuid4
 from config import SETTINGS
 from src.data.polymarket_client import PolymarketClient
 from src.data.types import Market, Position, TradeDecision, TradeResult
+from src.notify.telegram import Notifier
 from src.storage.db import TraceStore
 from src.utils.logger import get_logger
 
@@ -16,9 +17,15 @@ SLIPPAGE_TOLERANCE = 0.005  # 0.5% — design doc default
 
 
 class ExecutionEngine:
-    def __init__(self, client: PolymarketClient, store: TraceStore) -> None:
+    def __init__(
+        self,
+        client: PolymarketClient,
+        store: TraceStore,
+        notifier: Notifier | None = None,
+    ) -> None:
         self._client = client
         self._store = store
+        self._notifier = notifier or Notifier()
 
     def execute(self, decision: TradeDecision, market: Market) -> TradeResult:
         if decision.action != "buy" or decision.position_size_usdc <= 0:
@@ -41,6 +48,10 @@ class ExecutionEngine:
                 order_id=order_id, status="dry_run", raw=None,
             )
             self._open_position(decision, market, limit_price)
+            self._notifier.position_opened(
+                question=market.question, side=decision.side, price=limit_price,
+                size_usdc=decision.position_size_usdc, edge=decision.edge, mode=mode,
+            )
             return TradeResult(executed=True, order_id=order_id, filled_price=limit_price,
                                size=size_tokens, reason="dry_run")
 
@@ -64,6 +75,10 @@ class ExecutionEngine:
             status="placed", raw=resp,
         )
         self._open_position(decision, market, limit_price)
+        self._notifier.position_opened(
+            question=market.question, side=decision.side, price=limit_price,
+            size_usdc=decision.position_size_usdc, edge=decision.edge, mode=mode,
+        )
         return TradeResult(executed=True, order_id=order_id, filled_price=limit_price,
                            size=size_tokens, reason="placed")
 

@@ -11,6 +11,18 @@ log = get_logger("detector")
 
 MIN_HISTORY = 120  # bars needed for the longest lookback (slow_grind / breakout)
 
+# Whitelist derived from the 300-market backtest (see 回测分析报告 §6.1 update):
+#   Only `breakout + narrow_pullback` survives 2x-sample regression-to-mean.
+#   `narrow_pullback + vol_spike` flipped to negative sharpe at the same price band.
+# We keep vol_spike admissible only as a THIRD confirmation (3-signal score had +1.3 sharpe).
+_REQUIRED_CORE = frozenset({"narrow_pullback", "breakout"})
+
+
+def is_whitelisted_combo(signals: list[str] | set[str]) -> bool:
+    """Require both `breakout` AND `narrow_pullback`. Other signals are allowed but
+    not required (vol_spike etc. may add as 3rd confirmation)."""
+    return _REQUIRED_CORE.issubset(set(signals))
+
 
 class SmartMoneyDetector:
     """Five behaviour-based price signals. Trigger if ≥ 2 fire.

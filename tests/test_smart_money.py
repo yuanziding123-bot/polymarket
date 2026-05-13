@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from src.data.types import Candle
-from src.detector.smart_money import SmartMoneyDetector
+from src.detector.smart_money import SmartMoneyDetector, is_whitelisted_combo
 
 
 def make_candles(closes: list[float], volumes: list[float]) -> list[Candle]:
@@ -45,6 +45,18 @@ def test_vol_spike_alone_does_not_trigger():
     assert "vol_spike" in result.signals
     assert result.score == 1
     assert not result.triggered
+
+
+def test_whitelist_requires_both_breakout_and_narrow_pullback():
+    # winning combos require BOTH breakout and narrow_pullback (per 300-market backtest)
+    assert is_whitelisted_combo(["narrow_pullback", "breakout"])
+    assert is_whitelisted_combo(["narrow_pullback", "breakout", "vol_spike"])
+    # missing one of the required pair
+    assert not is_whitelisted_combo(["narrow_pullback", "vol_spike"])
+    assert not is_whitelisted_combo(["breakout", "vol_spike"])
+    assert not is_whitelisted_combo(["narrow_pullback"])
+    assert not is_whitelisted_combo(["breakout"])
+    assert not is_whitelisted_combo(["slow_grind", "vol_trend"])
 
 
 if __name__ == "__main__":

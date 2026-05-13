@@ -26,7 +26,7 @@ def _get_int(key: str, default: int) -> int:
     return int(raw) if raw is not None else default
 
 
-@dataclass(frozen=True)
+@dataclass
 class Settings:
     # Polymarket
     polymarket_api_key: str | None
@@ -53,6 +53,17 @@ class Settings:
     # Scheduler
     main_loop_interval: int
     monitor_loop_interval: int
+
+    # Circuit breaker
+    max_daily_loss_pct: float
+    max_total_exposure_pct: float
+    max_concurrent_positions: int
+    max_consecutive_losses: int
+    consecutive_loss_cooldown_seconds: int
+
+    # Telegram
+    telegram_bot_token: str | None
+    telegram_chat_id: str | None
 
     @property
     def is_live(self) -> bool:
@@ -81,6 +92,13 @@ def load_settings() -> Settings:
         sqlite_path=sqlite_path,
         main_loop_interval=_get_int("MAIN_LOOP_INTERVAL_SECONDS", 600),
         monitor_loop_interval=_get_int("MONITOR_LOOP_INTERVAL_SECONDS", 30),
+        max_daily_loss_pct=_get_float("MAX_DAILY_LOSS_PCT", 0.05),
+        max_total_exposure_pct=_get_float("MAX_TOTAL_EXPOSURE_PCT", 0.50),
+        max_concurrent_positions=_get_int("MAX_CONCURRENT_POSITIONS", 10),
+        max_consecutive_losses=_get_int("MAX_CONSECUTIVE_LOSSES", 5),
+        consecutive_loss_cooldown_seconds=_get_int("CONSECUTIVE_LOSS_COOLDOWN_SECONDS", 3600),
+        telegram_bot_token=_get("TELEGRAM_BOT_TOKEN"),
+        telegram_chat_id=_get("TELEGRAM_CHAT_ID"),
     )
 
 

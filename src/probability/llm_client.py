@@ -65,13 +65,57 @@ class LLMClient:
             return None
 
         text = "".join(block.text for block in resp.content if getattr(block, "type", "") == "text")
-        text = text.strip()
-        if text.startswith("```"):
-            text = text.strip("`")
-            if text.lower().startswith("json"):
-                text = text[4:]
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            log.warning(f"LLM response was not JSON: {text[:200]}")
-            return None
+        return _extract_json(text)
+
+
+def _extract_json(text: str) -> dict[str, Any] | None:
+    """Tolerant JSON extractor: strips markdown fences, then locates the first
+    `{ … }` block (or `[ … ]`) by bracket counting so trailing prose / leading
+    preambles don't break parsing."""
+    s = text.strip()
+    if s.startswith("```"):
+        # Drop opening fence and optional "json" tag
+        s = s.lstrip("`").lstrip()
+        if s.lower().startswith("json"):
+            s = s[4:].lstrip()
+        # Drop closing fence if still present
+        if "```" in s:
+            s = s.split("```", 1)[0]
+
+    # Find the first balanced { ... } block
+    start = s.find("{")
+    if start == -1:
+        log.warning(f"LLM response had no JSON object: {text[:200]}")
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    end = -1
+    for i in range(start, len(s)):
+        ch = s[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    if end == -1:
+        log.warning(f"LLM response had unbalanced JSON: {text[:200]}")
+        return None
+    try:
+        return json.loads(s[start:end])
+    except json.JSONDecodeError as exc:
+        log.warning(f"LLM JSON parse failed ({exc}): {s[start:end][:200]}")
+        return None

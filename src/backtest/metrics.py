@@ -37,11 +37,30 @@ class BacktestReport:
     by_signal: list[SignalStats] = field(default_factory=list)         # any single signal present
     by_combo: list[SignalStats] = field(default_factory=list)          # exact signal combo
     by_score: list[SignalStats] = field(default_factory=list)          # score = signal count
+    by_price_band: list[SignalStats] = field(default_factory=list)     # entry price bucket
+    by_band_x_combo: list[SignalStats] = field(default_factory=list)   # (band, combo) interaction
 
     @property
     def header(self) -> list[str]:
         return ["label", "n", "hit_rate", "avg_ret", "median_ret",
                 "std_ret", "sharpe_trial", "avg_entry_px"]
+
+
+# Price bands from the design doc — strategy A targets 0.07-0.19 specifically.
+PRICE_BANDS = [
+    ("p<0.10", 0.0, 0.10),
+    ("p<0.10-0.20", 0.10, 0.20),  # the alleged sweet spot
+    ("p<0.20-0.30", 0.20, 0.30),
+    ("p<0.30-0.50", 0.30, 0.50),
+    ("p>=0.50", 0.50, 1.01),
+]
+
+
+def _band_for(price: float) -> str:
+    for label, lo, hi in PRICE_BANDS:
+        if lo <= price < hi:
+            return label
+    return "unknown"
 
 
 def aggregate(trials: list[Trial]) -> BacktestReport:
@@ -72,8 +91,27 @@ def aggregate(trials: list[Trial]) -> BacktestReport:
         by_score_buckets.setdefault(t.score, []).append(t)
     by_score = [_stats(f"score={k}", ts) for k, ts in sorted(by_score_buckets.items())]
 
-    return BacktestReport(overall=overall, by_signal=by_signal,
-                           by_combo=by_combo, by_score=by_score)
+    # by entry-price band
+    by_band: dict[str, list[Trial]] = {}
+    for t in trials:
+        by_band.setdefault(_band_for(t.entry_price), []).append(t)
+    by_price_band = [_stats(b, by_band[b]) for b, _, _ in PRICE_BANDS if b in by_band]
+
+    # by (band, combo) — only show buckets with n>=5 to filter noise
+    by_band_combo: dict[str, list[Trial]] = {}
+    for t in trials:
+        key = f"{_band_for(t.entry_price)} | {'+'.join(t.signals)}"
+        by_band_combo.setdefault(key, []).append(t)
+    by_band_x_combo = sorted(
+        (_stats(k, ts) for k, ts in by_band_combo.items() if len(ts) >= 5),
+        key=lambda s: s.sharpe_per_trial, reverse=True,
+    )
+
+    return BacktestReport(
+        overall=overall, by_signal=by_signal,
+        by_combo=by_combo, by_score=by_score,
+        by_price_band=by_price_band, by_band_x_combo=by_band_x_combo,
+    )
 
 
 def _stats(label: str, trials: Iterable[Trial]) -> SignalStats:

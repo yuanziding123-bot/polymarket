@@ -15,7 +15,7 @@ import sys
 import time
 
 from config import SETTINGS
-from src.backtest.runner import print_report, run_backtest
+from src.backtest.runner import print_alpha_summary, print_report, run_backtest
 from src.data.polymarket_client import PolymarketClient
 from src.learning.loop import LearningLoop
 from src.pipeline.main_pipeline import build_pipeline, run_once
@@ -43,9 +43,11 @@ def cmd_scan_once(_: argparse.Namespace) -> None:
 
 
 def cmd_monitor_once(_: argparse.Namespace) -> None:
+    from src.notify.telegram import Notifier
     client = PolymarketClient()
     store = TraceStore()
-    risk = RiskManager(client, store)
+    notifier = Notifier()
+    risk = RiskManager(client, store, notifier=notifier)
     run_monitor_once(client, store, risk)
 
 
@@ -58,12 +60,16 @@ def cmd_review(_: argparse.Namespace) -> None:
 
 
 def cmd_backtest(args: argparse.Namespace) -> None:
-    _, report = run_backtest(
+    horizons = [int(h) for h in args.horizons.split(",") if h.strip()]
+    results = run_backtest(
         n_markets=args.markets,
-        horizon_bars=args.horizon,
+        horizons=horizons,
         dedupe_bars=args.dedupe,
     )
-    print_report(report, horizon_bars=args.horizon)
+    for h in horizons:
+        trials, report = results[h]
+        print_report(report, horizon_bars=h)
+    print_alpha_summary(results)
 
 
 def cmd_run(args: argparse.Namespace) -> None:
@@ -71,7 +77,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     from apscheduler.schedulers.background import BackgroundScheduler
 
     components = build_pipeline()
-    risk = RiskManager(components.client, components.store)
+    risk = RiskManager(components.client, components.store, notifier=components.notifier)
 
     sched = BackgroundScheduler(timezone="UTC")
     sched.add_job(
@@ -112,7 +118,8 @@ def main(argv: list[str] | None = None) -> int:
 
     bt = sub.add_parser("backtest", help="replay SmartMoneyDetector on historical candles")
     bt.add_argument("--markets", type=int, default=30, help="number of markets to sample")
-    bt.add_argument("--horizon", type=int, default=24, help="forward bars to measure return")
+    bt.add_argument("--horizons", type=str, default="24",
+                    help="comma-separated forward bars to measure return (e.g. 6,24,168)")
     bt.add_argument("--dedupe", type=int, default=12, help="min bars between trials per market")
 
     args = parser.parse_args(argv)
