@@ -68,22 +68,36 @@ class PolymarketClient:
     # ----- read-only market discovery (Gamma) -----
 
     def list_active_markets(self, limit: int = 500) -> list[dict]:
-        """Pull active, non-archived markets from Gamma."""
-        params = {
-            "active": "true",
-            "archived": "false",
-            "closed": "false",
-            "limit": limit,
-            "order": "volume24hr",
-            "ascending": "false",
-        }
-        try:
-            r = self._handles.http.get(f"{GAMMA_BASE}/markets", params=params)
-            r.raise_for_status()
-            return r.json()
-        except Exception as exc:
-            log.error(f"Gamma list_active_markets failed: {exc}")
-            return []
+        """Pull active, non-archived markets from Gamma. Auto-paginates via
+        offset because Gamma caps each response at 100 markets regardless of
+        the requested limit."""
+        PAGE = 100  # Gamma's hard cap per response
+        out: list[dict] = []
+        offset = 0
+        while len(out) < limit:
+            params = {
+                "active": "true",
+                "archived": "false",
+                "closed": "false",
+                "limit": min(PAGE, limit - len(out)),
+                "offset": offset,
+                "order": "volume24hr",
+                "ascending": "false",
+            }
+            try:
+                r = self._handles.http.get(f"{GAMMA_BASE}/markets", params=params)
+                r.raise_for_status()
+                page = r.json() or []
+            except Exception as exc:
+                log.error(f"Gamma list_active_markets failed at offset={offset}: {exc}")
+                break
+            if not page:
+                break
+            out.extend(page)
+            if len(page) < PAGE:
+                break  # last page
+            offset += PAGE
+        return out
 
     def to_markets(self, raw_markets: Iterable[dict]) -> list[Market]:
         """Normalize Gamma payloads into Market objects (one per outcome side).
