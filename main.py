@@ -16,6 +16,7 @@ import time
 
 from config import SETTINGS
 from src.backtest.runner import print_alpha_summary, print_report, run_backtest
+from src.cli.status import show_status
 from src.data.polymarket_client import PolymarketClient
 from src.learning.loop import LearningLoop
 from src.pipeline.main_pipeline import build_pipeline, run_once
@@ -57,6 +58,10 @@ def cmd_review(_: argparse.Namespace) -> None:
     loop = LearningLoop(store, llm)
     result = loop.daily_review()
     log.info(f"Review → {result}")
+
+
+def cmd_status(_: argparse.Namespace) -> None:
+    show_status()
 
 
 def cmd_backtest(args: argparse.Namespace) -> None:
@@ -115,6 +120,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("monitor-once", help="run a single risk-monitor iteration")
     sub.add_parser("review", help="run the daily learning review")
     sub.add_parser("run", help="start the scheduler (main + monitor)")
+    sub.add_parser("status", help="print SQLite snapshot of today's activity")
 
     bt = sub.add_parser("backtest", help="replay SmartMoneyDetector on historical candles")
     bt.add_argument("--markets", type=int, default=30, help="number of markets to sample")
@@ -131,6 +137,7 @@ def main(argv: list[str] | None = None) -> int:
         "review": cmd_review,
         "run": cmd_run,
         "backtest": cmd_backtest,
+        "status": cmd_status,
     }[args.cmd](args)
     return 0
 
