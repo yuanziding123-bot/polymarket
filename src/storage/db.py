@@ -93,6 +93,20 @@ class TraceStore:
                  ",".join(signals), score),
             )
 
+    def recent_signal_within(self, market_id: str, hours: float = 12.0) -> bool:
+        """True if this market triggered a (whitelisted) signal within the lookback.
+        Used by the live pipeline to avoid re-paying for LLM calls on a market
+        that's been in a triggered state for many consecutive scans — mirrors
+        the backtest's `dedupe_bars` parameter."""
+        from datetime import datetime, timedelta, timezone
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        with self._conn() as cx:
+            row = cx.execute(
+                "SELECT 1 FROM signals WHERE market_id=? AND ts >= ? LIMIT 1",
+                (market_id, cutoff),
+            ).fetchone()
+        return row is not None
+
     def record_decision(self, decision: Any, components: dict[str, float]) -> None:
         with self._conn() as cx:
             cx.execute(

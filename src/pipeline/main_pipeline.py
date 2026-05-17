@@ -75,6 +75,12 @@ def run_once(components: PipelineComponents, candidate_limit: int = 25) -> None:
         if not is_whitelisted_combo(detection.signals):
             log.debug(f"Signal triggered but not whitelisted {detection.signals} — skipping")
             continue
+        # 12h dedupe — mirrors the backtest `dedupe_bars=12`. Prevents paying
+        # for the same LLM judgement on a market that has been in a triggered
+        # state for many consecutive 10-min scans.
+        if components.store.recent_signal_within(market.market_id, hours=12.0):
+            log.debug(f"Signal dedupe hit (within 12h): {market.question[:60]}")
+            continue
         n_signals += 1
         components.store.record_signal(market, detection.signals, detection.score)
 
