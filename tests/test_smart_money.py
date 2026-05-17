@@ -47,14 +47,16 @@ def test_vol_spike_alone_does_not_trigger():
     assert not result.triggered
 
 
-def test_whitelist_requires_both_breakout_and_narrow_pullback():
-    # winning combos require BOTH breakout and narrow_pullback (per 300-market backtest)
+def test_whitelist_requires_narrow_pullback_plus_breakout_or_vol_spike():
+    # narrow_pullback is the anchor; breakout OR vol_spike confirms
     assert is_whitelisted_combo(["narrow_pullback", "breakout"])
+    assert is_whitelisted_combo(["narrow_pullback", "vol_spike"])
     assert is_whitelisted_combo(["narrow_pullback", "breakout", "vol_spike"])
-    # missing one of the required pair
-    assert not is_whitelisted_combo(["narrow_pullback", "vol_spike"])
-    assert not is_whitelisted_combo(["breakout", "vol_spike"])
+    # narrow_pullback alone is not enough
     assert not is_whitelisted_combo(["narrow_pullback"])
+    assert not is_whitelisted_combo(["narrow_pullback", "slow_grind"])
+    # missing narrow_pullback
+    assert not is_whitelisted_combo(["breakout", "vol_spike"])
     assert not is_whitelisted_combo(["breakout"])
     assert not is_whitelisted_combo(["slow_grind", "vol_trend"])
 

@@ -11,17 +11,20 @@ log = get_logger("detector")
 
 MIN_HISTORY = 120  # bars needed for the longest lookback (slow_grind / breakout)
 
-# Whitelist derived from the 300-market backtest (see 回测分析报告 §6.1 update):
-#   Only `breakout + narrow_pullback` survives 2x-sample regression-to-mean.
-#   `narrow_pullback + vol_spike` flipped to negative sharpe at the same price band.
-# We keep vol_spike admissible only as a THIRD confirmation (3-signal score had +1.3 sharpe).
-_REQUIRED_CORE = frozenset({"narrow_pullback", "breakout"})
+# Whitelist re-derived 2026-05-17 after detector recalibration backtest:
+#   With relaxed thresholds, the alpha shifted from 0.10-0.20 to <0.10.
+#   Both `breakout+narrow_pullback` (sharpe +0.139) and `narrow_pullback+vol_spike`
+#   (sharpe +0.104) showed positive alpha at n=99-140 in the <0.10 band.
+#   Every positive-sharpe bucket contained narrow_pullback as the anchor signal.
+#   `breakout+vol_spike` alone (no narrow_pullback) was negative at sharpe -0.451.
+_ANCHOR = "narrow_pullback"
+_CONFIRMS = frozenset({"breakout", "vol_spike"})
 
 
 def is_whitelisted_combo(signals: list[str] | set[str]) -> bool:
-    """Require both `breakout` AND `narrow_pullback`. Other signals are allowed but
-    not required (vol_spike etc. may add as 3rd confirmation)."""
-    return _REQUIRED_CORE.issubset(set(signals))
+    """Require `narrow_pullback` AND at least one of `breakout` or `vol_spike`."""
+    sigset = set(signals)
+    return _ANCHOR in sigset and bool(sigset & _CONFIRMS)
 
 
 class SmartMoneyDetector:
@@ -59,6 +62,11 @@ class SmartMoneyDetector:
 
     # --- signals --------------------------------------------------------
 
+    # Thresholds re-calibrated 2026-05-17 after live diagnostic showed 4/5 signals
+    # never fired on real Polymarket data (slow probability markets, not stock-like
+    # momentum). Goal: get trigger rate from <0.1/day to ~5-10/day while preserving
+    # the directional alpha pattern (narrow_pullback as anchor signal).
+
     @staticmethod
     def _slow_grind(closes: Sequence[float]) -> bool:
         window = closes[-120:]
@@ -70,7 +78,8 @@ class SmartMoneyDetector:
             for i in range(1, len(window))
             if window[i - 1] > 0
         )
-        return total_change > 0.05 and max_single < 0.015
+        # was: total>5% AND single<1.5%
+        return total_change > 0.03 and max_single < 0.020
 
     @staticmethod
     def _volume_trend(volumes: Sequence[float]) -> bool:
@@ -78,7 +87,8 @@ class SmartMoneyDetector:
         if not any(window):
             return False
         slope, r2 = linear_regression(window)
-        return slope > 0 and r2 > 0.5
+        # was: R²>0.5 (too strict for lumpy Polymarket volume)
+        return slope > 0 and r2 > 0.3
 
     @staticmethod
     def _narrowing_pullback(closes: Sequence[float]) -> bool:
@@ -90,6 +100,7 @@ class SmartMoneyDetector:
         earlier_dd = _max_drawdown(earlier)
         if earlier_dd == 0:
             return False
+        # unchanged — this is the only signal that fires on live data
         return recent_dd < earlier_dd * 0.6
 
     @staticmethod
@@ -101,7 +112,8 @@ class SmartMoneyDetector:
         if ma120 == 0:
             return False
         bias = abs(ma60 - ma120) / ma120
-        return bias < 0.02 and closes[-1] > ma60 * 1.03
+        # was: bias<2% AND close>MA60*1.03 (3% breakout)
+        return bias < 0.03 and closes[-1] > ma60 * 1.015
 
     @staticmethod
     def _vol_spike(volumes: Sequence[float]) -> bool:
@@ -111,7 +123,8 @@ class SmartMoneyDetector:
         baseline = safe_mean(volumes[-65:-5])
         if baseline == 0:
             return False
-        return recent_avg > baseline * 2.5
+        # was: 2.5x baseline (too rare on Polymarket)
+        return recent_avg > baseline * 1.5
 
 
 def _max_drawdown(prices: Sequence[float]) -> float:

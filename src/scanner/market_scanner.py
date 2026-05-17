@@ -12,10 +12,11 @@ log = get_logger("scanner")
 
 @dataclass(frozen=True)
 class FilterConfig:
-    # Tightened to the alpha-validated band per 回测分析报告 §6.1:
-    #   <0.10 is a "go-to-zero" trap with negative alpha
-    #   ≥0.30 has unreliable signals; ≥0.50 is consistently negative
-    min_price: float = 0.10
+    # Updated 2026-05-17 after recalibration backtest:
+    #   With relaxed detector thresholds, the alpha pocket shifted from
+    #   0.10-0.20 down to <0.10 (relaxed `breakout` catches rising-from-zero
+    #   pattern). 0.30-0.50 weak, ≥0.50 still negative.
+    min_price: float = 0.05
     max_price: float = 0.30
     min_volume_24h: float = 5_000.0
     min_liquidity: float = 10_000.0
