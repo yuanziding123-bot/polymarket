@@ -65,6 +65,9 @@ class Settings:
     telegram_bot_token: str | None
     telegram_chat_id: str | None
 
+    # Estimator selection
+    estimator_mode: str   # "llm" | "ml" | "ml_only" (ml_only skips Bull/Bear)
+
     @property
     def is_live(self) -> bool:
         return self.run_mode.lower() == "live"
@@ -99,6 +102,7 @@ def load_settings() -> Settings:
         consecutive_loss_cooldown_seconds=_get_int("CONSECUTIVE_LOSS_COOLDOWN_SECONDS", 3600),
         telegram_bot_token=_get("TELEGRAM_BOT_TOKEN"),
         telegram_chat_id=_get("TELEGRAM_CHAT_ID"),
+        estimator_mode=_get("ESTIMATOR_MODE", "llm") or "llm",
     )
 
 

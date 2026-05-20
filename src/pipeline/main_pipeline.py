@@ -3,17 +3,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from config import SETTINGS
 from src.agents.debate import DebateOrchestrator
 from src.data.news_client import NewsClient
 from src.data.polymarket_client import PolymarketClient
+from src.data.types import TradeDecision
 from src.detector.smart_money import SmartMoneyDetector, is_whitelisted_combo
 from src.execution.engine import ExecutionEngine
 from src.notify.telegram import Notifier
 from src.probability.estimator import ProbabilityEstimator
 from src.probability.llm_client import LLMClient
+from src.probability.ml_estimator import MLProbabilityEstimator
 from src.risk.circuit_breaker import CircuitBreaker
 from src.scanner.market_scanner import FilterConfig, MarketScanner
 from src.storage.db import TraceStore
+from src.utils.kelly import kelly_position_usdc
 from src.utils.logger import get_logger
 
 log = get_logger("main_pipeline")
@@ -40,11 +44,19 @@ def build_pipeline() -> PipelineComponents:
     llm = LLMClient()
     notifier = Notifier()
 
+    mode = SETTINGS.estimator_mode.lower()
+    if mode in ("ml", "ml_only"):
+        estimator = MLProbabilityEstimator(client=client, store=store)
+        log.info(f"Estimator: ML (mode={mode})")
+    else:
+        estimator = ProbabilityEstimator(llm, news)
+        log.info("Estimator: LLM (Claude + news + base rate)")
+
     return PipelineComponents(
         client=client,
         scanner=MarketScanner(client, FilterConfig()),
         detector=SmartMoneyDetector(),
-        estimator=ProbabilityEstimator(llm, news),
+        estimator=estimator,
         debate=DebateOrchestrator(llm),
         execution=ExecutionEngine(client, store, notifier=notifier),
         store=store,
@@ -87,8 +99,13 @@ def run_once(components: PipelineComponents, candidate_limit: int = 25) -> None:
         log.info(f"Signal HIT {market.question[:60]} score={detection.score} sigs={detection.signals}")
 
         prob = components.estimator.estimate(market, detection)
-        news_items = components.news.search(market.question, max_results=5)
-        decision = components.debate.run(market, detection, prob, news_items)
+
+        if SETTINGS.estimator_mode.lower() == "ml_only":
+            # Bypass Bull/Bear/Judge — trust ML edge directly.
+            decision = _ml_only_decision(market, detection, prob)
+        else:
+            news_items = components.news.search(market.question, max_results=5)
+            decision = components.debate.run(market, detection, prob, news_items)
         components.store.record_decision(decision, prob.components)
 
         if decision.action == "buy":
@@ -106,3 +123,38 @@ def run_once(components: PipelineComponents, candidate_limit: int = 25) -> None:
         n_signals=n_signals, n_buys=n_buys,
     )
     log.info(f"Cycle done: filtered={n_filtered} signals={n_signals} buys={n_buys}")
+
+
+# ----------------------------------------------------------------------
+
+ML_ONLY_EDGE_FLOOR = 0.06
+
+
+def _ml_only_decision(market, detection, prob) -> TradeDecision:
+    """Bypass Bull/Bear. Buy if ML edge > floor; size with conservative Kelly."""
+    edge = prob.p_true - market.price
+    if edge < ML_ONLY_EDGE_FLOOR or prob.confidence == "low":
+        return TradeDecision(
+            market_id=market.market_id, token_id=market.token_id, side="buy",
+            market_price=market.price, p_true=prob.p_true, edge=edge,
+            position_size_usdc=0.0, action="skip",
+            reason=f"ml_edge<{ML_ONLY_EDGE_FLOOR} or low confidence",
+        )
+    size = kelly_position_usdc(
+        p_true=prob.p_true, p_market=market.price,
+        bankroll=SETTINGS.bankroll_usdc,
+        fraction_multiplier=0.25,
+        max_fraction=SETTINGS.max_position_fraction,
+    )
+    if size <= 0:
+        return TradeDecision(
+            market_id=market.market_id, token_id=market.token_id, side="buy",
+            market_price=market.price, p_true=prob.p_true, edge=edge,
+            position_size_usdc=0.0, action="skip", reason="kelly=0",
+        )
+    return TradeDecision(
+        market_id=market.market_id, token_id=market.token_id, side="buy",
+        market_price=market.price, p_true=prob.p_true, edge=edge,
+        position_size_usdc=size, action="buy",
+        reason=f"ml_only: edge={edge:+.4f} conf={prob.confidence}",
+    )
