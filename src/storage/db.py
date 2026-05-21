@@ -39,11 +39,13 @@ CREATE TABLE IF NOT EXISTS orders (
     order_id TEXT, status TEXT, raw_json TEXT
 );
 CREATE TABLE IF NOT EXISTS positions (
-    token_id TEXT PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_id TEXT NOT NULL,
     market_id TEXT, entry_price REAL, peak_price REAL,
     size_usdc REAL, opened_at TEXT, expiry TEXT,
     closed_at TEXT, close_reason TEXT, exit_price REAL, pnl_usdc REAL
 );
+CREATE INDEX IF NOT EXISTS idx_positions_open ON positions(token_id, closed_at);
 CREATE TABLE IF NOT EXISTS trades_cache (
     condition_id TEXT NOT NULL,
     asset TEXT NOT NULL,
@@ -64,7 +66,43 @@ class TraceStore:
         self._path = path or SETTINGS.sqlite_path
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as cx:
+            self._migrate_positions_schema(cx)
             cx.executescript(_SCHEMA)
+
+    @staticmethod
+    def _migrate_positions_schema(cx: sqlite3.Connection) -> None:
+        """One-shot migration: old `positions` had `token_id PRIMARY KEY`, which
+        blocked re-opening a closed position on the same token. Detect and rebuild
+        with an auto-increment id PK while preserving any rows."""
+        row = cx.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='positions'"
+        ).fetchone()
+        if not row:
+            return  # fresh DB, normal CREATE will apply
+        existing_sql = row["sql"] or ""
+        # If existing table already has the new id PK, nothing to do.
+        if "id INTEGER PRIMARY KEY AUTOINCREMENT" in existing_sql:
+            return
+        # Rebuild with new schema; preserve data.
+        cx.executescript("""
+            ALTER TABLE positions RENAME TO positions_old;
+            CREATE TABLE positions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_id TEXT NOT NULL,
+                market_id TEXT, entry_price REAL, peak_price REAL,
+                size_usdc REAL, opened_at TEXT, expiry TEXT,
+                closed_at TEXT, close_reason TEXT, exit_price REAL, pnl_usdc REAL
+            );
+            INSERT INTO positions
+                (token_id, market_id, entry_price, peak_price, size_usdc,
+                 opened_at, expiry, closed_at, close_reason, exit_price, pnl_usdc)
+            SELECT token_id, market_id, entry_price, peak_price, size_usdc,
+                   opened_at, expiry, closed_at, close_reason, exit_price, pnl_usdc
+            FROM positions_old;
+            DROP TABLE positions_old;
+            CREATE INDEX IF NOT EXISTS idx_positions_open
+                ON positions(token_id, closed_at);
+        """)
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -132,15 +170,44 @@ class TraceStore:
             )
 
     def upsert_position(self, position: Any) -> None:
+        """Open a new position OR add to an existing open position on the same token.
+
+        When the same token is bought twice (e.g. a re-trigger after the 12h dedupe),
+        we weight-average the entry prices by tokens held and sum the USDC notional.
+        This mirrors how a real exchange aggregates fills into a single position —
+        Polymarket tokens are fungible. Prior behaviour silently overwrote only
+        peak_price and dropped the second buy from position tracking.
+        """
         with self._conn() as cx:
-            cx.execute(
-                """INSERT INTO positions(token_id,market_id,entry_price,peak_price,size_usdc,
-                   opened_at,expiry) VALUES(?,?,?,?,?,?,?)
-                   ON CONFLICT(token_id) DO UPDATE SET peak_price=excluded.peak_price""",
-                (position.token_id, position.market_id, position.entry_price,
-                 position.peak_price, position.size_usdc,
-                 position.opened_at.isoformat(), position.expiry.isoformat()),
-            )
+            existing = cx.execute(
+                "SELECT entry_price, size_usdc, peak_price FROM positions "
+                "WHERE token_id=? AND closed_at IS NULL",
+                (position.token_id,),
+            ).fetchone()
+            if existing:
+                old_size = float(existing["size_usdc"])
+                old_entry = float(existing["entry_price"])
+                tokens_old = old_size / old_entry if old_entry > 0 else 0.0
+                tokens_new = position.size_usdc / position.entry_price if position.entry_price > 0 else 0.0
+                tokens_total = tokens_old + tokens_new
+                if tokens_total <= 0:
+                    return
+                new_size = old_size + position.size_usdc
+                new_entry = new_size / tokens_total
+                new_peak = max(float(existing["peak_price"]), position.peak_price)
+                cx.execute(
+                    "UPDATE positions SET entry_price=?, peak_price=?, size_usdc=? "
+                    "WHERE token_id=? AND closed_at IS NULL",
+                    (new_entry, new_peak, new_size, position.token_id),
+                )
+            else:
+                cx.execute(
+                    """INSERT INTO positions(token_id,market_id,entry_price,peak_price,size_usdc,
+                       opened_at,expiry) VALUES(?,?,?,?,?,?,?)""",
+                    (position.token_id, position.market_id, position.entry_price,
+                     position.peak_price, position.size_usdc,
+                     position.opened_at.isoformat(), position.expiry.isoformat()),
+                )
 
     def close_position(self, token_id: str, reason: str, exit_price: float, pnl_usdc: float) -> None:
         with self._conn() as cx:
