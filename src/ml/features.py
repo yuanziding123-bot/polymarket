@@ -275,6 +275,68 @@ def list_cached_markets(db_path: str, min_trades: int = 200) -> list[str]:
     return [r[0] for r in rows]
 
 
+def load_resolved_markets(db_path: str, min_trades: int = 200) -> list[dict]:
+    """Return resolved markets that also have trade data cached."""
+    cx = sqlite3.connect(db_path)
+    cx.row_factory = sqlite3.Row
+    rows = cx.execute(
+        """SELECT m.condition_id, m.yes_token_id, m.no_token_id, m.winning_side, m.question
+           FROM markets_metadata m
+           WHERE m.closed=1 AND m.winning_side IN ('YES','NO')
+             AND m.condition_id IN (
+               SELECT condition_id FROM trades_cache
+               GROUP BY condition_id HAVING COUNT(*) >= ?
+             )""",
+        (min_trades,),
+    ).fetchall()
+    cx.close()
+    return [dict(r) for r in rows]
+
+
+def resolution_label_for_token(token_id: str, market: dict) -> int | None:
+    """Return 1 if this token resolved to $1, 0 if it resolved to $0, None if unknown."""
+    winning = market.get("winning_side")
+    if winning == "YES":
+        if token_id == market["yes_token_id"]:
+            return 1
+        if token_id == market["no_token_id"]:
+            return 0
+    elif winning == "NO":
+        if token_id == market["no_token_id"]:
+            return 1
+        if token_id == market["yes_token_id"]:
+            return 0
+    return None
+
+
+def iter_resolution_dataset(db_path: str, min_trades: int = 200):
+    """Yield (features, label, market_id, token_id, bar_ts) using REAL resolution outcomes.
+
+    Unlike iter_dataset (which uses 24h forward return as label), here the label
+    is whether this specific token eventually resolved to $1.
+    """
+    markets = load_resolved_markets(db_path, min_trades)
+    for m in markets:
+        trades = load_trades_from_cache(db_path, m["condition_id"])
+        if not trades:
+            continue
+        for asset in (m["yes_token_id"], m["no_token_id"]):
+            bars = reconstruct_bars(trades, asset=asset)
+            if len(bars) < MIN_HISTORY_BARS + 1:
+                continue
+            label = resolution_label_for_token(asset, m)
+            if label is None:
+                continue
+            # Sample throughout the market's life (not just final bar).
+            # Skip the last HORIZON_BARS so we have a forward-window distance
+            # from settlement (avoid resolution-day data leak).
+            for i in range(MIN_HISTORY_BARS, len(bars) - HORIZON_BARS, SAMPLE_STRIDE_BARS):
+                feats = extract_features(bars, i)
+                if feats is None:
+                    continue
+                yield feats, label, m["condition_id"], asset, bars[i].ts
+
+
 def iter_dataset(db_path: str, min_trades: int = 200):
     """Yield (features, label, forward_return, market_id, bar_ts) across all cached markets."""
     market_ids = list_cached_markets(db_path, min_trades)

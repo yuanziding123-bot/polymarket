@@ -58,6 +58,19 @@ CREATE TABLE IF NOT EXISTS trades_cache (
     PRIMARY KEY (condition_id, asset, timestamp, tx_hash)
 );
 CREATE INDEX IF NOT EXISTS idx_trades_cond_ts ON trades_cache(condition_id, timestamp);
+CREATE TABLE IF NOT EXISTS markets_metadata (
+    condition_id TEXT PRIMARY KEY,
+    question TEXT,
+    yes_token_id TEXT,
+    no_token_id TEXT,
+    winning_side TEXT,        -- "YES" | "NO" | NULL if unresolved
+    closed INTEGER DEFAULT 0,
+    end_date TEXT,
+    closed_time TEXT,
+    last_trade_price REAL,
+    last_fetched_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_markets_closed ON markets_metadata(closed, winning_side);
 """
 
 
@@ -247,6 +260,38 @@ class TraceStore:
                 rows,
             )
         return len(rows)
+
+    def upsert_market_metadata(self, condition_id: str, *, question: str,
+                                yes_token_id: str, no_token_id: str,
+                                winning_side: str | None, closed: bool,
+                                end_date: str, closed_time: str | None,
+                                last_trade_price: float | None) -> None:
+        with self._conn() as cx:
+            cx.execute(
+                """INSERT INTO markets_metadata
+                   (condition_id, question, yes_token_id, no_token_id, winning_side,
+                    closed, end_date, closed_time, last_trade_price, last_fetched_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(condition_id) DO UPDATE SET
+                     question=excluded.question,
+                     yes_token_id=excluded.yes_token_id,
+                     no_token_id=excluded.no_token_id,
+                     winning_side=excluded.winning_side,
+                     closed=excluded.closed,
+                     end_date=excluded.end_date,
+                     closed_time=excluded.closed_time,
+                     last_trade_price=excluded.last_trade_price,
+                     last_fetched_at=excluded.last_fetched_at""",
+                (condition_id, question, yes_token_id, no_token_id, winning_side,
+                 1 if closed else 0, end_date, closed_time, last_trade_price, _now()),
+            )
+
+    def get_resolved_markets(self) -> list[sqlite3.Row]:
+        """All markets with a known winning_side (resolved)."""
+        with self._conn() as cx:
+            return list(cx.execute(
+                "SELECT * FROM markets_metadata WHERE closed=1 AND winning_side IN ('YES','NO')"
+            ))
 
     def cached_trade_ts_range(self, condition_id: str) -> tuple[int, int] | None:
         """Return (min_ts, max_ts) currently cached for this market, or None."""
