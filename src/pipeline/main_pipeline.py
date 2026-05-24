@@ -81,6 +81,16 @@ def run_once(components: PipelineComponents, candidate_limit: int = 25) -> None:
         components.store.record_scan(0, 0, 0, 0)
         return
 
+    mode = SETTINGS.estimator_mode.lower()
+    if mode == "ml_short_horizon":
+        n_signals, n_buys = _run_ml_short_horizon_cycle(components, candidates, candidate_limit)
+        components.store.record_scan(
+            n_raw=len(candidates), n_filtered=n_filtered,
+            n_signals=n_signals, n_buys=n_buys,
+        )
+        log.info(f"Cycle done: filtered={n_filtered} signals={n_signals} buys={n_buys}")
+        return
+
     n_signals = 0
     n_buys = 0
 
@@ -107,10 +117,7 @@ def run_once(components: PipelineComponents, candidate_limit: int = 25) -> None:
 
         prob = components.estimator.estimate(market, detection)
 
-        mode = SETTINGS.estimator_mode.lower()
-        if mode == "ml_short_horizon":
-            decision = _ml_short_horizon_decision(market, detection, prob)
-        elif mode == "ml_only":
+        if mode == "ml_only":
             decision = _ml_only_decision(market, detection, prob)
         else:
             news_items = components.news.search(market.question, max_results=5)
@@ -167,6 +174,48 @@ def _ml_only_decision(market, detection, prob) -> TradeDecision:
         position_size_usdc=size, action="buy",
         reason=f"ml_only: edge={edge:+.4f} conf={prob.confidence}",
     )
+
+
+def _run_ml_short_horizon_cycle(components, candidates, candidate_limit: int) -> tuple[int, int]:
+    """ML-short-horizon decision loop. Bypasses K-line detector and whitelist
+    entirely — the ML model is the alpha gate. Each scanner-passed candidate
+    gets scored directly; trades fire when predicted 6h return >= threshold."""
+    from src.data.types import DetectionResult
+
+    n_evaluated = 0
+    n_buys = 0
+    fake_detection = DetectionResult(triggered=True, score=0, signals=["ml_short_horizon"])
+
+    for market in candidates[:candidate_limit]:
+        if components.store.recent_signal_within(market.market_id, hours=12.0):
+            continue
+
+        prob = components.estimator.estimate(market, fake_detection)
+        if prob.confidence == "low":
+            # Either market too old (>14d) or predicted return too small.
+            continue
+
+        n_evaluated += 1
+        components.store.record_signal(market, ["ml_short_horizon"], 0)
+        log.info(
+            f"ML short-horizon eval: {market.question[:60]} "
+            f"px={market.price:.4f} pred_ret={prob.p_true - market.price:+.4f} "
+            f"conf={prob.confidence}"
+        )
+
+        decision = _ml_short_horizon_decision(market, fake_detection, prob)
+        components.store.record_decision(decision, prob.components)
+
+        if decision.action == "buy":
+            verdict = components.circuit_breaker.check(decision.position_size_usdc)
+            if not verdict.allowed:
+                components.notifier.circuit_breaker(verdict.reason)
+                log.warning(f"Trade blocked by circuit breaker: {verdict.reason}")
+                continue
+            result = components.execution.execute(decision, market)
+            if result.executed:
+                n_buys += 1
+    return n_evaluated, n_buys
 
 
 def _ml_short_horizon_decision(market, detection, prob) -> TradeDecision:
