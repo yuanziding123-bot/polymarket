@@ -14,6 +14,10 @@ from src.notify.telegram import Notifier
 from src.probability.estimator import ProbabilityEstimator
 from src.probability.llm_client import LLMClient
 from src.probability.ml_estimator import MLProbabilityEstimator
+from src.probability.ml_short_horizon_estimator import (
+    DECISION_THRESHOLD_PRED_RETURN,
+    MLShortHorizonEstimator,
+)
 from src.risk.circuit_breaker import CircuitBreaker
 from src.scanner.market_scanner import FilterConfig, MarketScanner
 from src.storage.db import TraceStore
@@ -45,7 +49,10 @@ def build_pipeline() -> PipelineComponents:
     notifier = Notifier()
 
     mode = SETTINGS.estimator_mode.lower()
-    if mode in ("ml", "ml_only"):
+    if mode == "ml_short_horizon":
+        estimator = MLShortHorizonEstimator(client=client, store=store)
+        log.info("Estimator: ML short-horizon (6h forward, late-stage markets)")
+    elif mode in ("ml", "ml_only"):
         estimator = MLProbabilityEstimator(client=client, store=store)
         log.info(f"Estimator: ML (mode={mode})")
     else:
@@ -100,8 +107,10 @@ def run_once(components: PipelineComponents, candidate_limit: int = 25) -> None:
 
         prob = components.estimator.estimate(market, detection)
 
-        if SETTINGS.estimator_mode.lower() == "ml_only":
-            # Bypass Bull/Bear/Judge — trust ML edge directly.
+        mode = SETTINGS.estimator_mode.lower()
+        if mode == "ml_short_horizon":
+            decision = _ml_short_horizon_decision(market, detection, prob)
+        elif mode == "ml_only":
             decision = _ml_only_decision(market, detection, prob)
         else:
             news_items = components.news.search(market.question, max_results=5)
@@ -157,4 +166,45 @@ def _ml_only_decision(market, detection, prob) -> TradeDecision:
         market_price=market.price, p_true=prob.p_true, edge=edge,
         position_size_usdc=size, action="buy",
         reason=f"ml_only: edge={edge:+.4f} conf={prob.confidence}",
+    )
+
+
+def _ml_short_horizon_decision(market, detection, prob) -> TradeDecision:
+    """Short-horizon decision: trade when predicted 6h return >= threshold.
+
+    Since estimator sets p_true = market_price + predicted_return, edge IS
+    the predicted_return. Threshold from sweep is +0.20 (sharpe +0.198).
+    """
+    predicted_return = prob.p_true - market.price
+    if prob.confidence == "low":
+        return TradeDecision(
+            market_id=market.market_id, token_id=market.token_id, side="buy",
+            market_price=market.price, p_true=prob.p_true, edge=predicted_return,
+            position_size_usdc=0.0, action="skip",
+            reason=prob.uncertainty or "low confidence (predicted return too small)",
+        )
+    if predicted_return < DECISION_THRESHOLD_PRED_RETURN:
+        return TradeDecision(
+            market_id=market.market_id, token_id=market.token_id, side="buy",
+            market_price=market.price, p_true=prob.p_true, edge=predicted_return,
+            position_size_usdc=0.0, action="skip",
+            reason=f"predicted_return {predicted_return:+.4f} < {DECISION_THRESHOLD_PRED_RETURN}",
+        )
+    size = kelly_position_usdc(
+        p_true=prob.p_true, p_market=market.price,
+        bankroll=SETTINGS.bankroll_usdc,
+        fraction_multiplier=0.25,
+        max_fraction=SETTINGS.max_position_fraction,
+    )
+    if size <= 0:
+        return TradeDecision(
+            market_id=market.market_id, token_id=market.token_id, side="buy",
+            market_price=market.price, p_true=prob.p_true, edge=predicted_return,
+            position_size_usdc=0.0, action="skip", reason="kelly=0",
+        )
+    return TradeDecision(
+        market_id=market.market_id, token_id=market.token_id, side="buy",
+        market_price=market.price, p_true=prob.p_true, edge=predicted_return,
+        position_size_usdc=size, action="buy",
+        reason=f"ml_short_horizon: pred_ret={predicted_return:+.4f} conf={prob.confidence}",
     )

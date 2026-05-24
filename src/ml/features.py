@@ -118,6 +118,8 @@ FEATURE_NAMES = [
     "high_low_range_5",
 ]
 
+SHORT_HORIZON_FEATURE_NAMES = FEATURE_NAMES + ["days_to_resolution", "log_days_to_resolution"]
+
 
 def extract_features(bars: list[HourlyBar], i: int) -> np.ndarray | None:
     """Return a feature vector at bar index `i`, or None if not enough history."""
@@ -306,6 +308,118 @@ def resolution_label_for_token(token_id: str, market: dict) -> int | None:
             return 1
         if token_id == market["yes_token_id"]:
             return 0
+    return None
+
+
+def extract_short_horizon_features(bars: list[HourlyBar], i: int,
+                                     days_to_resolution: float) -> np.ndarray | None:
+    """Like extract_features but appends days_to_resolution + log version."""
+    base = extract_features(bars, i)
+    if base is None:
+        return None
+    return np.concatenate([
+        base,
+        np.array([days_to_resolution,
+                  float(np.log(max(0.01, days_to_resolution)))], dtype=float),
+    ])
+
+
+SHORT_HORIZON_BARS = 6     # predict 6h ahead
+SHORT_UP_THRESH = 0.01     # > 1% up to count as positive label
+LATE_STAGE_DAYS_MAX = 14   # only sample from markets with ≤ 14 days to resolution
+
+
+def make_short_horizon_label(bars: list[HourlyBar], i: int) -> int | None:
+    if i + SHORT_HORIZON_BARS >= len(bars):
+        return None
+    entry = bars[i].close
+    exit_ = bars[i + SHORT_HORIZON_BARS].close
+    if entry <= 0:
+        return None
+    return 1 if exit_ > entry * (1 + SHORT_UP_THRESH) else 0
+
+
+def make_short_horizon_return(bars: list[HourlyBar], i: int) -> float | None:
+    """Real 6h forward log return."""
+    if i + SHORT_HORIZON_BARS >= len(bars):
+        return None
+    entry = bars[i].close
+    exit_ = bars[i + SHORT_HORIZON_BARS].close
+    if entry <= 0:
+        return None
+    return (exit_ - entry) / entry
+
+
+def iter_short_horizon_dataset(db_path: str, min_trades: int = 200,
+                                 late_stage_days_max: float = LATE_STAGE_DAYS_MAX):
+    """Emit samples ONLY from late-stage markets (≤ N days to resolution).
+
+    Yields (features, label, forward_return, market_id, token_id, bar_ts).
+    """
+    from datetime import datetime, timezone
+    markets = load_resolved_markets(db_path, min_trades)
+    cutoff_seconds = late_stage_days_max * 86400.0
+
+    for m in markets:
+        # Need to know when resolution happened to compute days_to_resolution
+        cx = sqlite3.connect(db_path)
+        cx.row_factory = sqlite3.Row
+        row = cx.execute(
+            "SELECT closed_time, end_date FROM markets_metadata WHERE condition_id=?",
+            (m["condition_id"],),
+        ).fetchone()
+        cx.close()
+        if not row:
+            continue
+        resolution_ts = _parse_resolution_ts(row["closed_time"], row["end_date"])
+        if resolution_ts is None:
+            continue
+
+        trades = load_trades_from_cache(db_path, m["condition_id"])
+        if not trades:
+            continue
+        for asset in (m["yes_token_id"], m["no_token_id"]):
+            bars = reconstruct_bars(trades, asset=asset)
+            if len(bars) < MIN_HISTORY_BARS + SHORT_HORIZON_BARS:
+                continue
+            label = resolution_label_for_token(asset, m)
+            if label is None:
+                continue
+            for i in range(MIN_HISTORY_BARS, len(bars) - SHORT_HORIZON_BARS, SAMPLE_STRIDE_BARS):
+                seconds_left = resolution_ts - bars[i].ts
+                if seconds_left <= 0 or seconds_left > cutoff_seconds:
+                    continue
+                days_to_resolution = seconds_left / 86400.0
+                feats = extract_short_horizon_features(bars, i, days_to_resolution)
+                if feats is None:
+                    continue
+                short_label = make_short_horizon_label(bars, i)
+                short_ret = make_short_horizon_return(bars, i)
+                if short_label is None or short_ret is None:
+                    continue
+                yield feats, short_label, short_ret, m["condition_id"], asset, bars[i].ts
+
+
+def _parse_resolution_ts(closed_time: str | None, end_date: str | None) -> int | None:
+    """Parse ISO timestamp to unix seconds; prefer closed_time over end_date.
+
+    Polymarket returns multiple formats; normalise:
+      '2026-03-19 23:20:15+00'   → '2026-03-19T23:20:15+00:00'
+      '2026-03-19T23:20:15Z'     → '2026-03-19T23:20:15+00:00'
+      '2026-03-19T23:20:15+00:00' (already fine)
+    """
+    from datetime import datetime
+    for s in (closed_time, end_date):
+        if not s:
+            continue
+        cleaned = s.strip().replace(" ", "T").replace("Z", "+00:00")
+        # Short tz like '+00' must become '+00:00'
+        if len(cleaned) >= 3 and cleaned[-3] in {"+", "-"} and ":" not in cleaned[-3:]:
+            cleaned = cleaned + ":00"
+        try:
+            return int(datetime.fromisoformat(cleaned).timestamp())
+        except (ValueError, TypeError):
+            continue
     return None
 
 

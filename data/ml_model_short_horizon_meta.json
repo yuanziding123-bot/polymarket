@@ -1,6 +1,6 @@
 {
-  "n_samples": 209095,
-  "n_markets": 663,
+  "n_samples": 59113,
+  "n_markets": 689,
   "feature_names": [
     "price",
     "log_price",
@@ -34,7 +34,12 @@
     "buy_sell_imbalance_5",
     "n_trades_5",
     "n_trades_60",
-    "high_low_range_5"
+    "high_low_range_5",
+    "days_to_resolution",
+    "log_days_to_resolution"
   ],
-  "label_pos_rate": 0.4978311293909467
+  "late_stage_days_max": 14.0,
+  "label_pos_rate": 0.1439277316326358,
+  "model_type": "regressor",
+  "decision_rule": "predicted_return > 0.20"
 }
