@@ -34,8 +34,12 @@ log = get_logger("ml_sh_estimator")
 
 DEFAULT_MODEL_PATH = ROOT / "data" / "ml_model_short_horizon_regressor.txt"
 
-# Decision threshold matches the sweep's best config.
-DECISION_THRESHOLD_PRED_RETURN = 0.20
+# Decision threshold. Sweep showed both 0.10 (n=643, sharpe +0.118) and 0.20
+# (n=202, sharpe +0.198) give similar *annualised* sharpe (~11). Using 0.10
+# for the dry-run because pred>0.20 was rare enough that live triggers
+# became scarce — lower threshold keeps the system actively trading so we
+# can gather real PnL data faster.
+DECISION_THRESHOLD_PRED_RETURN = 0.10
 
 
 class MLShortHorizonEstimator:
@@ -82,11 +86,11 @@ class MLShortHorizonEstimator:
 
         predicted_return = float(self._model.predict(features.reshape(1, -1))[0])
 
-        # Confidence: pred>0.20 is decisive (sharpe +0.198 in backtest).
-        # Anything below is "low" so the pipeline skips it.
-        if predicted_return >= DECISION_THRESHOLD_PRED_RETURN:
+        # Confidence is graded so we can later analyse by tier.
+        # The pipeline buys whenever predicted_return >= DECISION_THRESHOLD.
+        if predicted_return >= 0.20:
             confidence = "high"
-        elif predicted_return >= 0.10:
+        elif predicted_return >= DECISION_THRESHOLD_PRED_RETURN:
             confidence = "medium"
         else:
             confidence = "low"
