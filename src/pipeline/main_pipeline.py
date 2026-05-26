@@ -186,8 +186,12 @@ def _run_ml_short_horizon_cycle(components, candidates, candidate_limit: int) ->
     n_buys = 0
     fake_detection = DetectionResult(triggered=True, score=0, signals=["ml_short_horizon"])
 
+    # 48h dedupe (was 12h). Live data showed model gives identical predictions
+    # for the same market at different price levels — 12h cooldown was too
+    # short and caused chasing tops + averaging down on Israel-Hezbollah:
+    # bought at $0.097, $0.13, $0.084 all on the same +14% prediction.
     for market in candidates[:candidate_limit]:
-        if components.store.recent_signal_within(market.market_id, hours=12.0):
+        if components.store.recent_signal_within(market.market_id, hours=48.0):
             continue
 
         prob = components.estimator.estimate(market, fake_detection)

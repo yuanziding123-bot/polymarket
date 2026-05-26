@@ -118,7 +118,18 @@ FEATURE_NAMES = [
     "high_low_range_5",
 ]
 
-SHORT_HORIZON_FEATURE_NAMES = FEATURE_NAMES + ["days_to_resolution", "log_days_to_resolution"]
+SHORT_HORIZON_FEATURE_NAMES = FEATURE_NAMES + [
+    "days_to_resolution", "log_days_to_resolution",
+    # Relative-position features added 2026-05-26 to fix the autocorrelation
+    # bug observed in dry-run: model gave identical predictions for the same
+    # market at very different price levels because no feature encoded
+    # "how much has price already moved from recent peak/trough".
+    "pct_from_peak_24h",        # (peak_24h - current) / peak_24h, ∈ [0, 1]
+    "pct_from_peak_72h",        # same for 72h window
+    "pct_from_trough_24h",      # (current - trough_24h) / trough_24h
+    "pct_from_trough_72h",      # same for 72h
+    "lifetime_pct",             # (current - lifetime_min) / (lifetime_max - lifetime_min)
+]
 
 
 def extract_features(bars: list[HourlyBar], i: int) -> np.ndarray | None:
@@ -313,14 +324,44 @@ def resolution_label_for_token(token_id: str, market: dict) -> int | None:
 
 def extract_short_horizon_features(bars: list[HourlyBar], i: int,
                                      days_to_resolution: float) -> np.ndarray | None:
-    """Like extract_features but appends days_to_resolution + log version."""
+    """Base features + days_to_resolution + relative-position features.
+
+    Relative-position features tell the model where the current price sits
+    relative to recent and lifetime peaks/troughs. Without these, the model
+    treated $0.097 and $0.13 as equivalent setups in dry-run.
+    """
     base = extract_features(bars, i)
     if base is None:
         return None
+    closes = np.array([b.close for b in bars[: i + 1]], dtype=float)
+    current = float(closes[-1])
+
+    def pct_from_peak(window: int) -> float:
+        if i < window:
+            window = i + 1
+        peak = float(closes[-window:].max())
+        return (peak - current) / peak if peak > 0 else 0.0
+
+    def pct_from_trough(window: int) -> float:
+        if i < window:
+            window = i + 1
+        trough = float(closes[-window:].min())
+        return (current - trough) / trough if trough > 0 else 0.0
+
+    lifetime_min = float(closes.min())
+    lifetime_max = float(closes.max())
+    lifetime_range = lifetime_max - lifetime_min
+    lifetime_pct = ((current - lifetime_min) / lifetime_range) if lifetime_range > 0 else 0.5
+
     return np.concatenate([
         base,
-        np.array([days_to_resolution,
-                  float(np.log(max(0.01, days_to_resolution)))], dtype=float),
+        np.array([
+            days_to_resolution,
+            float(np.log(max(0.01, days_to_resolution))),
+            pct_from_peak(24), pct_from_peak(72),
+            pct_from_trough(24), pct_from_trough(72),
+            lifetime_pct,
+        ], dtype=float),
     ])
 
 

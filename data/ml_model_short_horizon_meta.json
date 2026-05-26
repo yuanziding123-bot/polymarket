@@ -36,7 +36,12 @@
     "n_trades_60",
     "high_low_range_5",
     "days_to_resolution",
-    "log_days_to_resolution"
+    "log_days_to_resolution",
+    "pct_from_peak_24h",
+    "pct_from_peak_72h",
+    "pct_from_trough_24h",
+    "pct_from_trough_72h",
+    "lifetime_pct"
   ],
   "late_stage_days_max": 14.0,
   "label_pos_rate": 0.1439277316326358,
