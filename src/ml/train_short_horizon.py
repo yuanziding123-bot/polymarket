@@ -19,7 +19,11 @@ import lightgbm as lgb
 import numpy as np
 
 from config import ROOT
-from src.ml.features import SHORT_HORIZON_FEATURE_NAMES, iter_short_horizon_dataset
+from src.ml.features import (
+    SHORT_DOWN_THRESH,
+    SHORT_HORIZON_FEATURE_NAMES,
+    iter_short_horizon_dataset,
+)
 from src.utils.logger import get_logger
 
 log = get_logger("ml_train_sh")
@@ -27,15 +31,16 @@ log = get_logger("ml_train_sh")
 DB_PATH = str(ROOT / "data" / "traces.db")
 MODEL_OUT = ROOT / "data" / "ml_model_short_horizon.txt"
 MODEL_REG_OUT = ROOT / "data" / "ml_model_short_horizon_regressor.txt"
+MODEL_SELL_OUT = ROOT / "data" / "ml_model_short_horizon_sell_classifier.txt"
 META_OUT = ROOT / "data" / "ml_model_short_horizon_meta.json"
 
 
 def build_dataset(late_stage_days_max: float = 14.0):
-    feats, labels, fwd_rets, mids, tids, ts_list = [], [], [], [], [], []
-    for f, y, fwd, cid, tid, t in iter_short_horizon_dataset(
+    feats, labels, fwd_rets, drop_labels, mids, tids, ts_list = [], [], [], [], [], [], []
+    for f, y, fwd, cid, tid, t, drop_y in iter_short_horizon_dataset(
         DB_PATH, min_trades=200, late_stage_days_max=late_stage_days_max,
     ):
-        feats.append(f); labels.append(y); fwd_rets.append(fwd)
+        feats.append(f); labels.append(y); fwd_rets.append(fwd); drop_labels.append(drop_y)
         mids.append(cid); tids.append(tid); ts_list.append(t)
     return (
         np.array(feats, dtype=float),
@@ -43,6 +48,7 @@ def build_dataset(late_stage_days_max: float = 14.0):
         np.array(fwd_rets, dtype=float),
         np.array(ts_list, dtype=np.int64),
         mids,
+        np.array(drop_labels, dtype=int),
     )
 
 
@@ -77,7 +83,7 @@ def simulate_short_horizon(model, X, y, prices, fwd_rets, edge_threshold: float)
 
 def main(late_stage_days_max: float = 14.0):
     log.info(f"Building short-horizon dataset (late_stage_days_max={late_stage_days_max})…")
-    X, y, fwd_rets, ts, mids = build_dataset(late_stage_days_max)
+    X, y, fwd_rets, ts, mids, drop_y = build_dataset(late_stage_days_max)
     log.info(f"Dataset: {len(X)} samples, {len(set(mids))} markets, label pos rate={y.mean():.3f}")
     if len(X) < 500:
         log.error("Too few samples to train.")
@@ -157,6 +163,41 @@ def main(late_stage_days_max: float = 14.0):
     )
     regressor.save_model(str(MODEL_REG_OUT))
     log.info(f"Saved regressor → {MODEL_REG_OUT}")
+
+    # SELL classifier — predicts P(price drops >2% in 6h). Mirror of buy
+    # classifier; used by risk_manager to decide when to exit positions.
+    log.info("Training sell classifier (predict drop >2% in 6h)…")
+    train_data_sell = lgb.Dataset(X[train_idx], label=drop_y[train_idx],
+                                    feature_name=SHORT_HORIZON_FEATURE_NAMES)
+    val_data_sell = lgb.Dataset(X[val_idx], label=drop_y[val_idx],
+                                  feature_name=SHORT_HORIZON_FEATURE_NAMES,
+                                  reference=train_data_sell)
+    sell_clf = lgb.train(
+        {"objective": "binary", "metric": "binary_logloss",
+         "learning_rate": 0.05, "num_leaves": 31,
+         "feature_fraction": 0.8, "bagging_fraction": 0.8,
+         "bagging_freq": 5, "min_data_in_leaf": 50, "verbose": -1},
+        train_data_sell, num_boost_round=500,
+        valid_sets=[train_data_sell, val_data_sell], valid_names=["train", "val"],
+        callbacks=[lgb.early_stopping(30), lgb.log_evaluation(0)],
+    )
+    sell_clf.save_model(str(MODEL_SELL_OUT))
+    log.info(f"Saved sell classifier → {MODEL_SELL_OUT}")
+
+    # Evaluate sell classifier on test set
+    sp = sell_clf.predict(X[test_idx])
+    print(f"\nSell classifier backtest (label = drop >{SHORT_DOWN_THRESH * 100:.0f}% in 6h):")
+    print(f"  base rate (drop %): {drop_y[test_idx].mean():.3f}")
+    for thr in (0.30, 0.40, 0.50, 0.60, 0.70):
+        mask = sp > thr
+        if mask.sum() == 0:
+            continue
+        truly_dropped = float(drop_y[test_idx][mask].mean())
+        # avoid loss if we sold: if we hadn't sold, what's the avg forward return?
+        avg_fwd = float(test_fwd[mask].mean())
+        print(f"  P(drop)>{thr}: n={int(mask.sum()):4} "
+              f"drop_hit_rate={truly_dropped:.3f} "
+              f"avg_fwd_if_held={avg_fwd:+.4f}")
 
     # Evaluate regressor too
     rp = regressor.predict(X[test_idx])

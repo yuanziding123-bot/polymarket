@@ -33,6 +33,7 @@ from src.utils.logger import get_logger
 log = get_logger("ml_sh_estimator")
 
 DEFAULT_MODEL_PATH = ROOT / "data" / "ml_model_short_horizon_regressor.txt"
+SELL_MODEL_PATH = ROOT / "data" / "ml_model_short_horizon_sell_classifier.txt"
 
 # Decision threshold. Sweep showed both 0.10 (n=643, sharpe +0.118) and 0.20
 # (n=202, sharpe +0.198) give similar *annualised* sharpe (~11). Using 0.10
@@ -41,6 +42,11 @@ DEFAULT_MODEL_PATH = ROOT / "data" / "ml_model_short_horizon_regressor.txt"
 # can gather real PnL data faster.
 DECISION_THRESHOLD_PRED_RETURN = 0.10
 
+# Sell threshold: P(drop >2% in 6h) > this → close position.
+# Backtest: P(drop)>0.5 fires on 5.2% of held bars, 55.8% accurate,
+# saves ~6.7% average forward loss vs holding.
+SELL_THRESHOLD_DROP_PROB = 0.50
+
 
 class MLShortHorizonEstimator:
     def __init__(
@@ -48,14 +54,21 @@ class MLShortHorizonEstimator:
         client: PolymarketClient,
         store: TraceStore | None = None,
         model_path: Path | None = None,
+        sell_model_path: Path | None = None,
     ) -> None:
         path = model_path or DEFAULT_MODEL_PATH
         if not path.exists():
             raise FileNotFoundError(
-                f"Short-horizon model not found at {path}. "
+                f"Short-horizon buy model not found at {path}. "
                 "Run `python -m src.ml.train_short_horizon` first."
             )
         self._model = lgb.Booster(model_file=str(path))
+        sell_path = sell_model_path or SELL_MODEL_PATH
+        self._sell_model = lgb.Booster(model_file=str(sell_path)) if sell_path.exists() else None
+        if self._sell_model is None:
+            log.warning(f"Sell model not found at {sell_path}; exit signal disabled.")
+        else:
+            log.info(f"Loaded sell classifier from {sell_path}")
         self._client = client
         self._store = store or TraceStore()
         log.info(f"Loaded short-horizon regressor from {path}")
@@ -116,6 +129,50 @@ class MLShortHorizonEstimator:
             confidence="low",
             uncertainty=reason,
         )
+
+    def estimate_sell(self, token_id: str, condition_id: str,
+                       days_to_resolution: float) -> dict | None:
+        """Predict P(price drops >2% in next 6h) for a held position.
+
+        Returns dict with `drop_probability`, `should_sell`, and `reason`.
+        Returns None if model unavailable or features can't be built.
+        """
+        if self._sell_model is None:
+            return None
+        bars = self._build_bars_by_ids(condition_id, token_id)
+        if bars is None or len(bars) < MIN_HISTORY_BARS:
+            return None
+        i = len(bars) - 1
+        features = extract_short_horizon_features(bars, i, days_to_resolution)
+        if features is None:
+            return None
+        drop_prob = float(self._sell_model.predict(features.reshape(1, -1))[0])
+        should_sell = drop_prob >= SELL_THRESHOLD_DROP_PROB
+        return {
+            "drop_probability": drop_prob,
+            "should_sell": should_sell,
+            "reason": (f"ml_sell: P(drop>2%)={drop_prob:.3f} "
+                       f">= {SELL_THRESHOLD_DROP_PROB}" if should_sell else
+                       f"ml_sell: P(drop)={drop_prob:.3f} below threshold"),
+        }
+
+    def _build_bars_by_ids(self, condition_id: str, token_id: str):
+        """Same as _build_bars but takes IDs directly (for held positions)."""
+        cached = self._store.fetch_trades(condition_id, asset=token_id)
+        trades = [dict(r) for r in cached]
+        if not trades:
+            fresh = self._client.fetch_market_trades(condition_id)
+            if fresh:
+                self._store.insert_trades(condition_id, fresh)
+                trades = [
+                    {"timestamp": int(t["timestamp"]), "asset": t.get("asset"),
+                     "side": t.get("side"), "size": float(t.get("size", 0)),
+                     "price": float(t.get("price", 0))}
+                    for t in fresh if t.get("asset") == token_id
+                ]
+        if not trades:
+            return None
+        return reconstruct_bars(trades, asset=token_id)
 
     def _build_bars(self, market: Market):
         cached = self._store.fetch_trades(market.condition_id, asset=market.token_id)

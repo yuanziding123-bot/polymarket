@@ -366,11 +366,14 @@ def extract_short_horizon_features(bars: list[HourlyBar], i: int,
 
 
 SHORT_HORIZON_BARS = 6     # predict 6h ahead
-SHORT_UP_THRESH = 0.01     # > 1% up to count as positive label
+SHORT_UP_THRESH = 0.01     # > 1% up to count as positive buy label
+SHORT_DOWN_THRESH = 0.02   # < -2% down to count as positive sell label (asymmetric:
+                           # we want to exit before a meaningful drop, not just noise)
 LATE_STAGE_DAYS_MAX = 14   # only sample from markets with ≤ 14 days to resolution
 
 
 def make_short_horizon_label(bars: list[HourlyBar], i: int) -> int | None:
+    """Buy label: 1 if price rises >1% in 6h, else 0."""
     if i + SHORT_HORIZON_BARS >= len(bars):
         return None
     entry = bars[i].close
@@ -378,6 +381,18 @@ def make_short_horizon_label(bars: list[HourlyBar], i: int) -> int | None:
     if entry <= 0:
         return None
     return 1 if exit_ > entry * (1 + SHORT_UP_THRESH) else 0
+
+
+def make_short_horizon_drop_label(bars: list[HourlyBar], i: int) -> int | None:
+    """Sell label: 1 if price drops >2% in 6h, else 0. Asymmetric to buy
+    label because false-positive sell costs less than false-positive buy."""
+    if i + SHORT_HORIZON_BARS >= len(bars):
+        return None
+    entry = bars[i].close
+    exit_ = bars[i + SHORT_HORIZON_BARS].close
+    if entry <= 0:
+        return None
+    return 1 if exit_ < entry * (1 - SHORT_DOWN_THRESH) else 0
 
 
 def make_short_horizon_return(bars: list[HourlyBar], i: int) -> float | None:
@@ -434,11 +449,13 @@ def iter_short_horizon_dataset(db_path: str, min_trades: int = 200,
                 feats = extract_short_horizon_features(bars, i, days_to_resolution)
                 if feats is None:
                     continue
-                short_label = make_short_horizon_label(bars, i)
+                up_label = make_short_horizon_label(bars, i)
+                drop_label = make_short_horizon_drop_label(bars, i)
                 short_ret = make_short_horizon_return(bars, i)
-                if short_label is None or short_ret is None:
+                if up_label is None or drop_label is None or short_ret is None:
                     continue
-                yield feats, short_label, short_ret, m["condition_id"], asset, bars[i].ts
+                # Keep buy-call signature stable; add drop_label as 7th return value.
+                yield feats, up_label, short_ret, m["condition_id"], asset, bars[i].ts, drop_label
 
 
 def _parse_resolution_ts(closed_time: str | None, end_date: str | None) -> int | None:

@@ -85,6 +85,8 @@ class Position:
     peak_price: float
     opened_at: datetime
     expiry: datetime
+    condition_id: str | None = None
+    entry_decision_id: int | None = None
 
     @property
     def days_to_expiry(self) -> float:

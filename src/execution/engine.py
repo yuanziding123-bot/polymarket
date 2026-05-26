@@ -27,7 +27,8 @@ class ExecutionEngine:
         self._store = store
         self._notifier = notifier or Notifier()
 
-    def execute(self, decision: TradeDecision, market: Market) -> TradeResult:
+    def execute(self, decision: TradeDecision, market: Market,
+                 entry_decision_id: int | None = None) -> TradeResult:
         if decision.action != "buy" or decision.position_size_usdc <= 0:
             return TradeResult(executed=False, reason=decision.reason or "no_action")
 
@@ -47,7 +48,7 @@ class ExecutionEngine:
                 price=limit_price, size=size_tokens, mode=mode,
                 order_id=order_id, status="dry_run", raw=None,
             )
-            self._open_position(decision, market, limit_price)
+            self._open_position(decision, market, limit_price, entry_decision_id=entry_decision_id)
             self._notifier.position_opened(
                 question=market.question, side=decision.side, price=limit_price,
                 size_usdc=decision.position_size_usdc, edge=decision.edge, mode=mode,
@@ -82,7 +83,8 @@ class ExecutionEngine:
         return TradeResult(executed=True, order_id=order_id, filled_price=limit_price,
                            size=size_tokens, reason="placed")
 
-    def _open_position(self, decision: TradeDecision, market: Market, fill_price: float) -> None:
+    def _open_position(self, decision: TradeDecision, market: Market, fill_price: float,
+                        entry_decision_id: int | None = None) -> None:
         pos = Position(
             market_id=decision.market_id,
             token_id=decision.token_id,
@@ -91,6 +93,8 @@ class ExecutionEngine:
             peak_price=fill_price,
             opened_at=datetime.now(timezone.utc),
             expiry=market.expiry,
+            condition_id=market.condition_id,
+            entry_decision_id=entry_decision_id,
         )
         self._store.upsert_position(pos)
 

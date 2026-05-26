@@ -208,7 +208,7 @@ def _run_ml_short_horizon_cycle(components, candidates, candidate_limit: int) ->
         )
 
         decision = _ml_short_horizon_decision(market, fake_detection, prob)
-        components.store.record_decision(decision, prob.components)
+        decision_id = components.store.record_decision(decision, prob.components)
 
         if decision.action == "buy":
             verdict = components.circuit_breaker.check(decision.position_size_usdc)
@@ -216,7 +216,7 @@ def _run_ml_short_horizon_cycle(components, candidates, candidate_limit: int) ->
                 components.notifier.circuit_breaker(verdict.reason)
                 log.warning(f"Trade blocked by circuit breaker: {verdict.reason}")
                 continue
-            result = components.execution.execute(decision, market)
+            result = components.execution.execute(decision, market, entry_decision_id=decision_id)
             if result.executed:
                 n_buys += 1
     return n_evaluated, n_buys

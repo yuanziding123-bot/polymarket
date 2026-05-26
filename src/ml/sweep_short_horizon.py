@@ -22,7 +22,7 @@ DB_PATH = str(ROOT / "data" / "traces.db")
 
 def build_dataset(late_stage_days_max: float):
     feats, labels, fwd_rets, ts_list, mids = [], [], [], [], []
-    for f, y, fwd, cid, _tid, t in iter_short_horizon_dataset(
+    for f, y, fwd, cid, _tid, t, _drop in iter_short_horizon_dataset(
         DB_PATH, min_trades=200, late_stage_days_max=late_stage_days_max,
     ):
         feats.append(f); labels.append(y); fwd_rets.append(fwd)

@@ -45,10 +45,17 @@ def cmd_scan_once(_: argparse.Namespace) -> None:
 
 def cmd_monitor_once(_: argparse.Namespace) -> None:
     from src.notify.telegram import Notifier
+    from src.probability.ml_short_horizon_estimator import MLShortHorizonEstimator
     client = PolymarketClient()
     store = TraceStore()
     notifier = Notifier()
-    risk = RiskManager(client, store, notifier=notifier)
+    sell_estimator = None
+    if SETTINGS.estimator_mode.lower() == "ml_short_horizon":
+        try:
+            sell_estimator = MLShortHorizonEstimator(client=client, store=store)
+        except Exception as exc:
+            log.warning(f"Could not load ML sell estimator: {exc}")
+    risk = RiskManager(client, store, notifier=notifier, sell_estimator=sell_estimator)
     run_monitor_once(client, store, risk)
 
 
@@ -82,7 +89,11 @@ def cmd_run(args: argparse.Namespace) -> None:
     from apscheduler.schedulers.background import BackgroundScheduler
 
     components = build_pipeline()
-    risk = RiskManager(components.client, components.store, notifier=components.notifier)
+    # When ml_short_horizon mode is active, pass the same estimator into
+    # RiskManager so the sell classifier can fire on held positions.
+    sell_estimator = components.estimator if SETTINGS.estimator_mode.lower() == "ml_short_horizon" else None
+    risk = RiskManager(components.client, components.store,
+                        notifier=components.notifier, sell_estimator=sell_estimator)
 
     sched = BackgroundScheduler(timezone="UTC")
     sched.add_job(

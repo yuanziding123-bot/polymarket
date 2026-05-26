@@ -39,11 +39,16 @@ class RiskManager:
         store: TraceStore,
         rules: RiskRules | None = None,
         notifier: Notifier | None = None,
+        sell_estimator=None,
     ) -> None:
         self._client = client
         self._store = store
         self._rules = rules or RiskRules()
         self._notifier = notifier or Notifier()
+        # Optional: ML sell-signal estimator. When set, evaluate() adds an
+        # "ml_sell" reason alongside the static rules. The estimator must
+        # expose estimate_sell(token_id, condition_id, days_to_resolution).
+        self._sell_estimator = sell_estimator
 
     def evaluate(self) -> list[CloseAction]:
         actions: list[CloseAction] = []
@@ -66,6 +71,23 @@ class RiskManager:
             days_left = _days_left(row["expiry"])
 
             reason = self._classify(pnl_pct, peak, current_price, days_left)
+            # ML sell-signal (only if no static rule already fires).
+            # Requires positions.condition_id populated (post-2026-05-26 schema);
+            # legacy positions without it fall back to static rules only.
+            ml_sell_info = None
+            cond_id = row["condition_id"] if "condition_id" in row.keys() else None
+            if reason is None and self._sell_estimator is not None and cond_id:
+                ml_sell_info = self._sell_estimator.estimate_sell(
+                    token_id=row["token_id"],
+                    condition_id=cond_id,
+                    days_to_resolution=days_left,
+                )
+                if ml_sell_info and ml_sell_info.get("should_sell"):
+                    reason = "ml_sell"
+                    log.info(
+                        f"ML sell signal: {row['token_id'][:10]} "
+                        f"P(drop)={ml_sell_info['drop_probability']:.3f}"
+                    )
             if reason:
                 actions.append(CloseAction(
                     token_id=row["token_id"], market_id=row["market_id"],
@@ -98,8 +120,20 @@ class RiskManager:
         )
         # crude PnL: pct * size_usdc (approx, ignores partial fills)
         pnl_usdc = round(action.pnl_pct * _row_size(self._store, action.token_id), 2)
+
+        # Record a sell decision so we can pair it with the original buy.
+        from types import SimpleNamespace
+        sell_decision = SimpleNamespace(
+            market_id=action.market_id, token_id=action.token_id, action="sell",
+            market_price=action.current_price, p_true=action.current_price, edge=0.0,
+            position_size_usdc=0.0,
+            reason=f"close: {action.reason} (pnl {action.pnl_pct:+.2%})",
+            bull_summary="", bear_summary="",
+        )
+        exit_decision_id = self._store.record_decision(sell_decision, {"close_reason": 1.0})
         self._store.close_position(action.token_id, action.reason,
-                                   action.current_price, pnl_usdc)
+                                   action.current_price, pnl_usdc,
+                                   exit_decision_id=exit_decision_id)
         log.info(f"Closed {action.token_id[:10]} reason={action.reason} pnl={action.pnl_pct:+.2%}")
         question = _question_for_market(self._store, action.market_id)
         self._notifier.position_closed(

@@ -41,9 +41,11 @@ CREATE TABLE IF NOT EXISTS orders (
 CREATE TABLE IF NOT EXISTS positions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     token_id TEXT NOT NULL,
-    market_id TEXT, entry_price REAL, peak_price REAL,
+    market_id TEXT, condition_id TEXT,
+    entry_price REAL, peak_price REAL,
     size_usdc REAL, opened_at TEXT, expiry TEXT,
-    closed_at TEXT, close_reason TEXT, exit_price REAL, pnl_usdc REAL
+    closed_at TEXT, close_reason TEXT, exit_price REAL, pnl_usdc REAL,
+    entry_decision_id INTEGER, exit_decision_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_positions_open ON positions(token_id, closed_at);
 CREATE TABLE IF NOT EXISTS trades_cache (
@@ -93,8 +95,15 @@ class TraceStore:
         if not row:
             return  # fresh DB, normal CREATE will apply
         existing_sql = row["sql"] or ""
-        # If existing table already has the new id PK, nothing to do.
+        # If existing table already has the new id PK, just add new columns if missing.
         if "id INTEGER PRIMARY KEY AUTOINCREMENT" in existing_sql:
+            cols = {r[1] for r in cx.execute("PRAGMA table_info(positions)").fetchall()}
+            if "entry_decision_id" not in cols:
+                cx.execute("ALTER TABLE positions ADD COLUMN entry_decision_id INTEGER")
+            if "exit_decision_id" not in cols:
+                cx.execute("ALTER TABLE positions ADD COLUMN exit_decision_id INTEGER")
+            if "condition_id" not in cols:
+                cx.execute("ALTER TABLE positions ADD COLUMN condition_id TEXT")
             return
         # Rebuild with new schema; preserve data.
         cx.executescript("""
@@ -158,9 +167,10 @@ class TraceStore:
             ).fetchone()
         return row is not None
 
-    def record_decision(self, decision: Any, components: dict[str, float]) -> None:
+    def record_decision(self, decision: Any, components: dict[str, float]) -> int:
+        """Insert a decision row, return its auto-assigned id."""
         with self._conn() as cx:
-            cx.execute(
+            cur = cx.execute(
                 """INSERT INTO decisions(ts,market_id,token_id,action,market_price,p_true,edge,
                    position_size_usdc,reason,bull_summary,bear_summary,components_json)
                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
@@ -170,6 +180,7 @@ class TraceStore:
                  decision.bull_summary, decision.bear_summary,
                  json.dumps(components)),
             )
+            return int(cur.lastrowid)
 
     def record_order(self, market_id: str, token_id: str, side: str, price: float,
                      size: float, mode: str, order_id: str | None, status: str,
@@ -214,20 +225,27 @@ class TraceStore:
                     (new_entry, new_peak, new_size, position.token_id),
                 )
             else:
+                entry_decision_id = getattr(position, "entry_decision_id", None)
+                condition_id = getattr(position, "condition_id", None)
                 cx.execute(
-                    """INSERT INTO positions(token_id,market_id,entry_price,peak_price,size_usdc,
-                       opened_at,expiry) VALUES(?,?,?,?,?,?,?)""",
-                    (position.token_id, position.market_id, position.entry_price,
-                     position.peak_price, position.size_usdc,
-                     position.opened_at.isoformat(), position.expiry.isoformat()),
+                    """INSERT INTO positions(token_id,market_id,condition_id,
+                                              entry_price,peak_price,size_usdc,
+                                              opened_at,expiry,entry_decision_id)
+                       VALUES(?,?,?,?,?,?,?,?,?)""",
+                    (position.token_id, position.market_id, condition_id,
+                     position.entry_price, position.peak_price, position.size_usdc,
+                     position.opened_at.isoformat(), position.expiry.isoformat(),
+                     entry_decision_id),
                 )
 
-    def close_position(self, token_id: str, reason: str, exit_price: float, pnl_usdc: float) -> None:
+    def close_position(self, token_id: str, reason: str, exit_price: float,
+                        pnl_usdc: float, exit_decision_id: int | None = None) -> None:
         with self._conn() as cx:
             cx.execute(
-                """UPDATE positions SET closed_at=?, close_reason=?, exit_price=?, pnl_usdc=?
+                """UPDATE positions SET closed_at=?, close_reason=?, exit_price=?,
+                                          pnl_usdc=?, exit_decision_id=?
                    WHERE token_id=? AND closed_at IS NULL""",
-                (_now(), reason, exit_price, pnl_usdc, token_id),
+                (_now(), reason, exit_price, pnl_usdc, exit_decision_id, token_id),
             )
 
     # ----- reads --------------------------------------------------------
