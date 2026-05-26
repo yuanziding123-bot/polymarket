@@ -160,20 +160,29 @@ class RiskManager:
         return None
 
     def _latest_price(self, token_id: str) -> float | None:
+        """Get latest price. Prefers order-book midpoint (requires CLOB client),
+        falls back to the public prices-history endpoint (no auth needed).
+        Without the fallback, dry-run mode silently disables all risk rules."""
         book = self._client.get_order_book(token_id)
-        if not book:
-            return None
+        if book:
+            try:
+                bids = book.get("bids") or []
+                asks = book.get("asks") or []
+                if bids and asks:
+                    return (float(bids[0]["price"]) + float(asks[0]["price"])) / 2.0
+                if asks:
+                    return float(asks[0]["price"])
+                if bids:
+                    return float(bids[0]["price"])
+            except (KeyError, ValueError, TypeError):
+                pass
+        # Fallback: use the public prices-history endpoint
         try:
-            bids = book.get("bids") or []
-            asks = book.get("asks") or []
-            if bids and asks:
-                return (float(bids[0]["price"]) + float(asks[0]["price"])) / 2.0
-            if asks:
-                return float(asks[0]["price"])
-            if bids:
-                return float(bids[0]["price"])
-        except (KeyError, ValueError, TypeError):
-            return None
+            candles = self._client.fetch_price_history(token_id, interval="1h", fidelity=60)
+            if candles:
+                return float(candles[-1].close)
+        except Exception as exc:
+            log.warning(f"_latest_price fallback failed for {token_id[:10]}: {exc}")
         return None
 
     def _store_peak(self, token_id: str, peak: float) -> None:
