@@ -16,7 +16,10 @@ log = get_logger("risk")
 
 @dataclass(frozen=True)
 class RiskRules:
-    stop_loss_pct: float = 0.40
+    # Tightened 2026-05-28: was 0.40. Live data showed -40% gave too much
+    # room — Israel-Hezbollah closed at -41.83%, Mariners gapped to -55%.
+    # Risk/reward now 1 : 2.4 (-25% loss vs +60% take-profit).
+    stop_loss_pct: float = 0.25
     take_profit_pct: float = 0.60
     trailing_stop_pct: float = 0.15
     trailing_arm_pnl: float = 0.20  # arm trailing once unrealised PnL >= 20%
