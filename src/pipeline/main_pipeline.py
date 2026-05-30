@@ -1,6 +1,7 @@
 """Main loop (every 10 min by default): scan → detect → estimate → debate → execute."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from config import SETTINGS
@@ -176,6 +177,18 @@ def _ml_only_decision(market, detection, prob) -> TradeDecision:
     )
 
 
+_IN_PLAY_SPORTS_PATTERN = re.compile(r"\bvs\.?\b", re.IGNORECASE)
+
+
+def _is_in_play_sports(question: str) -> bool:
+    """'Team A vs Team B' single-game markets gap by tens of percent in seconds
+    once play starts — the 30s risk monitor can't catch the move. Two such
+    trades (Mariners 2026-05-27, Marlins 2026-05-29) hit -55% before stop_loss
+    could fire. Tournament/season questions ('Will X win the World Cup?')
+    don't use 'vs' and pass through."""
+    return bool(_IN_PLAY_SPORTS_PATTERN.search(question))
+
+
 def _run_ml_short_horizon_cycle(components, candidates, candidate_limit: int) -> tuple[int, int]:
     """ML-short-horizon decision loop. Bypasses K-line detector and whitelist
     entirely — the ML model is the alpha gate. Each scanner-passed candidate
@@ -192,6 +205,9 @@ def _run_ml_short_horizon_cycle(components, candidates, candidate_limit: int) ->
     # bought at $0.097, $0.13, $0.084 all on the same +14% prediction.
     for market in candidates[:candidate_limit]:
         if components.store.recent_signal_within(market.market_id, hours=48.0):
+            continue
+        if _is_in_play_sports(market.question):
+            log.debug(f"Skip in-play sports: {market.question[:60]}")
             continue
 
         prob = components.estimator.estimate(market, fake_detection)
